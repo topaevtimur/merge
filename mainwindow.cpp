@@ -10,9 +10,8 @@
 #include <vector>
 #include <tlhelp32.h>
 
-const int FIRST_TEAM = 0, SECOND_TEAM = 1, CAPTAIN = 0, PLAYER = 1;
-const int BLACK = 0, RED = 1, BLUE = 2, GRAY = 3;
-int myRole = 1,myTeam = 1;
+const int FIRST_TEAM = 0, SECOND_TEAM = 1, CAPTAIN = 0, PLAYER = 1, LOBBY = 0, IN_PROGRESS = 1;
+int myRole = 1,myTeam = 1, game_status = LOBBY;
 
 int opened[10][10];
 
@@ -23,7 +22,7 @@ QStandardItemModel *model;
 QStandardItem *item;
 QString tableWords[10][10];
 int tableColor[10][10];
-int active = 0;
+
 typedef struct {
     QString name;
     QString uid;
@@ -54,9 +53,9 @@ QString userHash(){
 
 int getMyRole(){
     QString myHash = userHash();
-    qDebug()<<gameRoles.size();
+    //qDebug()<<gameRoles.size();
     if ( gameRoles.find(myHash) != gameRoles.end() ) {
-        qDebug()<<"FIND IN";
+       // qDebug()<<"FIND IN";
         return gameRoles[myHash].role;
     }
     return(1);
@@ -95,23 +94,23 @@ void MainWindow::on_tableView_clicked(const QModelIndex &index)
     int col = index.column(), row = index.row();
 
     //condition true for captain else for player;
-    qDebug()<<getMyRole();
+    //qDebug()<<getMyRole();
     //qDebug()<<gameRoles;
-
-    QMessageBox msg;
     if(!getMyRole()) {
+        QMessageBox msg;
         msg.setText("Вы капитан");
         msg.exec();
         //do nothing;
-    } else if (!active){
-        msg.setText("Ход другого игрока");
-        msg.exec();
     } else {
         // should be sent about click
-        opened[row][col] = 1;
-        active = 0;
+        //opened[row][col] = 1;
+        if(!server){
+            QString go_hard = "clicked^"+QString::number(row)+"^"+QString::number(col)+"^"+self.uid;
+            QByteArray choseCell = go_hard.toLocal8Bit();
+            udpSocketCS->writeDatagram(choseCell.data(), choseCell.size(),
+                                     QHostAddress::Broadcast, 12121);
+        }
         display(1);
-
 //        item = new QStandardItem(QString("*"));
 //        model->setItem(row,col,item);
 //        ui->tableView->setModel(model);
@@ -129,8 +128,6 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     ui->setupUi(this);
     ui->startGame->hide();
-    ui->button_sent->hide();
-    ui->text_task->hide();
 
     self = m_p(userHash(),ui->nickname->text());
 
@@ -217,7 +214,6 @@ void MainWindow::on_button_host_released() //Start server
     setWindowTitle(tr("Broadcast Receiver"));
 
 }
-
 void MainWindow::processPendingDatagramsSC() //from client
 {
     while (udpSocketSC->hasPendingDatagrams()) {
@@ -225,8 +221,8 @@ void MainWindow::processPendingDatagramsSC() //from client
         QByteArray datagram;
         datagram.resize(udpSocketSC->pendingDatagramSize());
         udpSocketSC->readDatagram(datagram.data(), datagram.size());
-        std::cout << "Parsing "+tr("Received datagram: \"%1\"")
-                     .arg(datagram.data()).toStdString()<<std::endl;
+        qDebug()<<datagram.data();
+        //std::cout << "Parsing "+tr("Received datagram: \"%1\"").arg(datagram.data()).toStdString()<<std::endl;
         ui->statusLabel_2->setText(tr("FROM CLIENT Received datagram: \"%1\"")
                              .arg(datagram.data()));
         QString fromClient = datagram.data();
@@ -238,6 +234,21 @@ void MainWindow::processPendingDatagramsSC() //from client
         std::string token;
         std::vector<QString> tokens;
         QStringList list = gg.split("@");
+        if(list.size()==1){//Got clicker message!!!
+            QStringList parseClick = gg.split("^");
+            QString type = parseClick[0];
+            QString row = parseClick[1];
+            QString col = parseClick[2];
+            QString uid = parseClick[3];
+            opened[row.toLong()][col.toLong()] = 1;
+            int wantClickRole = gameRoles[uid].role;
+            if(active_team==FIRST_TEAM && active_role == wantClickRole){
+                //active_team = (active_team + 1) % 2; Переход команды убран, вместо второй команды будет бот
+                active_role = (wantClickRole + 1) % 2;
+            }
+            display(getMyRole());
+            continue;
+        }
         if(list.size()==3)
         gg = list[0]+"-"+list[1]+"-"+list[2];
         QString timestamp = list[2];
@@ -269,7 +280,7 @@ void MainWindow::processPendingDatagramsCS() //response from server
         udpSocketCS->readDatagram(datagram.data(), datagram.size());
         QString data = QTextCodec :: codecForLocale()->toUnicode(datagram);
        // QString data = datagram.data();
-        qDebug() << data;
+        //qDebug() << data;
         QString type;
         QString field;
         QString status;
@@ -291,9 +302,11 @@ void MainWindow::processPendingDatagramsCS() //response from server
             QStringList pair = fieldList[i].split(".");
             QString color = pair[0];
             QString word = pair[1];
+            QString ifClosed = pair[2];
            // qDebug()<<i%5<<' '<<i/5;
             tableWords[i/5][i%5] = word;
             tableColor[i/5][i%5] = color.toLong();
+            opened[i/5][i%5] = ifClosed.toLong();
             //item = new QStandardItem(tableWords[i%5][i/5]);
            // model->clear();
             //model->setItem(i/5,i%5,item);
@@ -305,7 +318,6 @@ void MainWindow::processPendingDatagramsCS() //response from server
         for(int i=0;i<playerList.size();i++){
             QString playerString = playerList[i];
             QStringList fields = playerString.split("@");
-            qDebug()<<"-------"<<fields.size()<<' '<<playerString;
             if(fields.size()<4) continue;
             player pl = m_p(fields[0],fields[1]);
             pl.role = fields[2].toLong();
@@ -317,24 +329,10 @@ void MainWindow::processPendingDatagramsCS() //response from server
         active_team = team.toLong();
         role = list[5];
         active_role = role.toLong();
-
-
         //std::cout<<list.size()<<std::endl;
         display(getMyRole());
         ui->statusLabel_2->setText(tr("FROM SERVER Received datagram: \"%1\"")
                              .arg(datagram.data()));
-        myRole = self.role;
-        myTeam = self.team;
-        if(self.role == 0) {
-            ui->button_sent->show();
-            ui->text_task->show();
-        }
-        if(self.role == active_role && active_team == self.team) {
-            QMessageBox msg;
-            msg.setText("Ваш ход");
-            msg.exec();
-            active = 1;
-        }
     }
 //! [2]
 }
@@ -361,12 +359,12 @@ void MainWindow::on_button_join_released()
 
 void MainWindow::startBroadcastingSC()
 {
-    timerSC->start(2000);
+    timerSC->start(500);
 }
 
 void MainWindow::startBroadcastingCS()
 {
-    timerCS->start(2000);
+    timerCS->start(500);
 }
 
 void MainWindow::broadcastDatagramSC() // data to client
@@ -398,7 +396,7 @@ void MainWindow::broadcastDatagramSC() // data to client
         cnt++;
     }
     QString result = type+"#"+field+"#"+game_status+"#"+player_list+"#"+team+"#"+role;
-    qDebug()<<result;
+    //qDebug()<<result;
     //std::cout<<result.toLocal8Bit().toStdString()<<std::endl;
 
     QByteArray datagram = result.toLocal8Bit();
@@ -426,7 +424,6 @@ void MainWindow::broadcastDatagramCS() //data to server
     ++messageNo;
 }
 
-
 void MainWindow::on_button_host_clicked()
 {
 
@@ -443,6 +440,7 @@ void MainWindow::on_startGame_released()
 {
     //generation roles for current active players
    // qDebug()<<"---Start";
+    game_status = IN_PROGRESS;
     std::vector<player> all;
     all.push_back(self);
     for(auto i : users){
@@ -461,14 +459,14 @@ void MainWindow::on_startGame_released()
         switch(i){
             case 0:
             {
-                gameRoles[uid].role = 0;
+                gameRoles[uid].role = 1;
                 gameRoles[uid].team = 0;
                 break;
             }
             case 1:
             {
                 gameRoles[uid].role = 0;
-                gameRoles[uid].team = 1;
+                gameRoles[uid].team = 0;
                 break;
             }
             default:
@@ -479,22 +477,8 @@ void MainWindow::on_startGame_released()
     for(auto i : gameRoles){
         QString a = i.first;
         player b = i.second;
-        qDebug()<<a<<' '<<b.name<<' '<<b.role<<' '<<b.team;
+        //qDebug()<<a<<' '<<b.name<<' '<<b.role<<' '<<b.team;
     }
     //qDebug()<<"---Finish";
-
-}
-
-void MainWindow::on_button_sent_released()
-{
-
-    QMessageBox msg;
-    if(!active) {
-        msg.setText("Ход другого игрока");
-        msg.exec();
-    } else {
-        // Отправить message
-        active = 0;
-    }
 
 }
